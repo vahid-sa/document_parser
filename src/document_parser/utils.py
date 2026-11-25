@@ -1,7 +1,28 @@
-import io
 import base64
+import io
 from typing import Tuple
-from PIL import Image
+
+from PIL import Image, ImageEnhance, ImageOps
+
+# پشتیبانی HEIC (فقط وقتی pillow-heif نصب باشد)
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except ImportError:  # pragma: no cover
+    pass
+
+
+def preprocess_image(image: Image.Image) -> Image.Image:
+    """پیش‌پردازش تصویر قبل از OCR (الگوی other_project).
+
+    خاکستری → autocontrast → شارپ‌تر → RGB
+    """
+    image = image.convert("L")
+    image = ImageOps.autocontrast(image)
+    enhancer = ImageEnhance.Sharpness(image)
+    image = enhancer.enhance(1.2)
+    return image.convert("RGB")
 
 
 def get_image_format_and_mime(image: Image.Image) -> Tuple[str, str]:

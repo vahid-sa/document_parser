@@ -1,43 +1,27 @@
+"""کلاینت LLM پایه با retry و backoff نمایی (۲**attempt)."""
+
+import asyncio
 import logging
-from PIL import Image
 from abc import ABC
-from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APITimeoutError, APIError, OpenAIError
+from typing import Dict, List, Optional, Union
+
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    OpenAIError,
+)
 from openai.types.chat import ChatCompletion
-from functools import wraps
-from typing import Optional, Union, List, Dict
 
-from .utils import image_to_url
-
+from .configs import get_settings
+from .exceptions import InternalParseError, LLMProviderError
 
 logger = logging.getLogger(__name__)
 
-
-def log_openai_error(func):
-
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        e = None
-        try:
-            ret = await func(*args, **kwargs)
-        except (APIError, APIConnectionError, APITimeoutError, APIStatusError) as e:
-            log = f"form: OpenAI API, message: {e.message}, base_url: {e.request.url}, method: {e.request.method}"
-            if e.type is not None:
-                log += f", type: {e.type}"
-            if e.code is not None:
-                log += f", code: {e.code}"
-            if e.param is not None:
-                log += f", param: {e.param}"
-            logger.exception(log)
-            raise
-        except OpenAIError as e:
-            logger.exception(f"from OpenAIError, message: {e}")
-            raise
-        except Exception as e:
-            logger.exception(f"from OpenAI Exception, message: {e}")
-            raise
-        return ret
-
-    return wrapper
+# خطاهای شبکه/API که retry می‌شوند (OpenAIError والد همهٔ آن‌هاست).
+_RETRYABLE_ERRORS = (APIError, APIConnectionError, APITimeoutError, APIStatusError, OpenAIError)
 
 
 class BaseLLm(ABC):
@@ -46,29 +30,63 @@ class BaseLLm(ABC):
         self.SYSTEM_PROMPT = system_prompt
         self._client = client
 
-    @log_openai_error
-    async def chat(self, user_content: List[Dict[str, Union[str, Dict[str, str]]]], **kwargs) -> ChatCompletion:
+    async def chat(
+        self,
+        user_content: List[Dict[str, Union[str, Dict[str, str]]]],
+        **kwargs,
+    ) -> ChatCompletion:
+        """فراخوانی مدل؛ در صورت شکست تا ``PARSER_LLM_MAX_RETRIES`` بار تلاش می‌شود.
+
+        خطای غیرمنتظرهٔ خودمان → ``InternalParseError`` (۵۰۰).
+        شکست نهایی بعد از retry → ``LLMProviderError`` (۵۰۲).
+        """
+        settings = get_settings()
+        max_attempts = max(1, settings.PARSER_LLM_MAX_RETRIES)
+
         messages = []
         if self.SYSTEM_PROMPT is not None:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": self.SYSTEM_PROMPT,
-                },
-            )
-        messages.append(
-            {
-                "role": "user",
-                "content": user_content
-            }
-        )
-        response = await self._client.chat.completions.create(messages=messages, model=self.MODEL_ID, **kwargs)
-        return response
+            messages.append({"role": "system", "content": self.SYSTEM_PROMPT})
+        messages.append({"role": "user", "content": user_content})
 
-    @log_openai_error
-    async def assert_api_ready(self):
+        last_error: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                response = await self._client.chat.completions.create(
+                    messages=messages,
+                    model=self.MODEL_ID,
+                    **kwargs,
+                )
+                return response
+            except _RETRYABLE_ERRORS as e:
+                last_error = e
+                logger.warning(
+                    "LLM call failed",
+                    extra={
+                        "model": self.MODEL_ID,
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "error": str(e),
+                    },
+                )
+                if attempt == max_attempts - 1:
+                    break
+                await asyncio.sleep(2**attempt)
+            except Exception as e:
+                logger.exception("unexpected error during LLM call")
+                raise InternalParseError(
+                    f"unexpected error during LLM call: {e}"
+                ) from e
+
+        raise LLMProviderError(
+            f"LLM call failed after {max_attempts} attempt(s); "
+            f"model: {self.MODEL_ID}; last error: {last_error}"
+        )
+
+    async def assert_api_ready(self) -> None:
+        """موجود بودن مدل روی endpoint را چک می‌کند (برای readyz و startup)."""
         models = await self._client.models.list()
         available = any(model.id == self.MODEL_ID for model in models.data)
         if not available:
-            log = f"model {self.MODEL_ID} does not exist in {self._client.base_url}"
-            raise AssertionError(log)
+            raise AssertionError(
+                f"model {self.MODEL_ID} does not exist in {self._client.base_url}"
+            )

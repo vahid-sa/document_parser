@@ -1,17 +1,45 @@
 [project]
-name = "pdf-parser"
-version = "0.1.0"
-description = "Add your description here"
+name = "document-parser"
+version = "0.2.0"
+description = "Document (PDF/image) to Markdown parser with LLM-based OCR for Persian documents"
 readme = "README.md"
 authors = [
     { name = "Vahid Saeedi", email = "vahid.saeedi7495@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "openai==2.54.0",
+    "pydantic==2.14.4",
+    "pydantic-settings==2.16.3",
+    "pymupdf==2.1",
+    "docling==2.151.1",
+    "pillow==13.0.0",
+    "pillow-heif>=0.21",
+    "python-magic==0.4.27",
+    "fastapi>=0.115",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.32",
+]
 
 [project.scripts]
-pdf-parser = "pdf_parser:main"
+document-parser = "document_parser.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "httpx==0.28.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: tests that run a real docling conversion",
+    "llm: tests that require a live LLM endpoint",
+]
